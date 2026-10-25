@@ -1,0 +1,126 @@
+<!doctype html>
+<!--
+  Hosts the YouTube IFrame Player and bridges it to C++.
+
+  This page is served from https://planar.example/ (a WebView2 virtual
+  host mapped onto this folder, see YouTubePlayer.cpp) so it has a real HTTPS
+  origin. YouTube refuses to play embeds from pages without one
+  (file:// or about:blank show "Error 153: video player configuration error").
+
+  C++ -> JS: YouTubePlayer calls window.app.* through RunScriptAsync.
+  JS -> C++: window.wx.postMessage(jsonString), which wxWebView injects when
+             AddScriptMessageHandler("wx") is called.
+-->
+<html>
+<head>
+<meta charset="utf-8">
+<title>Planar</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+  #player { width: 100%; height: 100%; display: block; }
+  /* Shown instead of the video until something is queued. Nothing plays
+     underneath it, so it doesn't conflict with YouTube's rule that a
+     playing video must be visible. */
+  #idle {
+    position: fixed; inset: 0; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 14px;
+    background: #F3F4F6; color: #6B7280;
+    font: 14px "Segoe UI", system-ui, sans-serif; user-select: none;
+  }
+  #idle svg { width: 64px; height: 64px; }
+  #idle.hidden { display: none; }
+</style>
+</head>
+<body>
+<div id="player"></div>
+<div id="idle">
+  <!-- Same geometry as client/assets/make_icon.py -->
+  <svg viewBox="0 0 64 64" aria-hidden="true">
+    <polygon points="32,26 58,40 32,54 6,40" fill="#C7D2FE"/>
+    <polygon points="32,10 58,24 32,38 6,24" fill="#4F46E5"/>
+  </svg>
+  <div>Nothing playing. Search for a song to start.</div>
+</div>
+<script>
+  "use strict";
+
+  var player = null;
+  var lastRequested = "";
+
+  function showIdle(show) {
+    document.getElementById("idle").classList.toggle("hidden", !show);
+  }
+
+  function post(msg) {
+    try {
+      window.wx.postMessage(JSON.stringify(msg));
+    } catch (e) {
+      console.error("postMessage to C++ failed", e);
+    }
+  }
+
+  var STATE_NAMES = { "-1": "unstarted", "0": "ended", "1": "playing", "2": "paused", "3": "buffering", "5": "cued" };
+
+  function snapshot() {
+    if (!player || !player.getPlayerState) return {};
+    var data = player.getVideoData ? player.getVideoData() : {};
+    return {
+      state: STATE_NAMES[String(player.getPlayerState())] || "unknown",
+      currentTime: player.getCurrentTime(),
+      duration: player.getDuration(),
+      videoId: data.video_id || "",
+      title: data.title || ""
+    };
+  }
+
+  // Called by the IFrame API script once it has loaded.
+  window.onYouTubeIframeAPIReady = function () {
+    player = new YT.Player("player", {
+      width: "100%",
+      height: "100%",
+      playerVars: {
+        playsinline: 1,
+        rel: 0,
+        // The app owns playback (the server is authoritative), so hide
+        // YouTube's own controls; otherwise a local click would desync us.
+        controls: 0,
+        disablekb: 1,
+        origin: location.origin
+      },
+      events: {
+        onReady: function () { post(Object.assign({ type: "ready" }, snapshot())); },
+        onStateChange: function () { post(Object.assign({ type: "stateChange" }, snapshot())); },
+        onError: function (e) {
+          // Report which video failed. The player may already have been told
+          // to load the next one, so the queue position alone is ambiguous.
+          var data = player.getVideoData ? player.getVideoData() : {};
+          var m = /[?&]v=([A-Za-z0-9_-]{11})/.exec(player.getVideoUrl ? player.getVideoUrl() : "");
+          post({ type: "error", code: e.data, videoId: data.video_id || (m && m[1]) || "", lastRequested: lastRequested });
+        }
+      }
+    });
+  };
+
+  // The API surface C++ talks to. Keep it small and dumb: all decisions about
+  // *what* to play and *when* live in C++ (PlaybackController).
+  window.app = {
+    play: function () { if (player) player.playVideo(); },
+    pause: function () { if (player) player.pauseVideo(); },
+    seekTo: function (sec) { if (player) player.seekTo(sec, true); },
+    load: function (videoId, startSec) { lastRequested = videoId; showIdle(false); if (player) player.loadVideoById({ videoId: videoId, startSeconds: startSec || 0 }); },
+    cue: function (videoId, startSec) { lastRequested = videoId; showIdle(false); if (player) player.cueVideoById({ videoId: videoId, startSeconds: startSec || 0 }); },
+    // Back to the idle screen (queue ran out). Stops the video underneath.
+    idle: function () { showIdle(true); if (player && player.stopVideo) player.stopVideo(); },
+    setVolume: function (v) { if (player) player.setVolume(v); },
+    // Polled by C++ for drift correction: answers with a "status" message
+    // (posting is cheaper than plumbing RunScript results back to C++).
+    reportStatus: function () { post(Object.assign({ type: "status" }, snapshot())); }
+  };
+
+  var tag = document.createElement("script");
+  tag.src = "https://www.youtube.com/iframe_api";
+  tag.onerror = function () { post({ type: "error", code: "api-load-failed" }); };
+  document.head.appendChild(tag);
+</script>
+</body>
+</html>

@@ -1,0 +1,23 @@
+name = "music-player-relay"
+main = "src/index.ts"
+compatibility_date = "2025-09-01"
+
+# One Durable Object instance per session, addressed by session ID.
+[[durable_objects.bindings]]
+name = "SESSIONS"
+class_name = "SessionRelay"
+
+# The free plan only supports SQLite-backed Durable Objects, so the class
+# must be declared with new_sqlite_classes (not new_classes).
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["SessionRelay"]
+
+# Cache for /search results (see src/search.ts). KV rather than the Cache
+# API, which does nothing on workers.dev domains.
+[[kv_namespaces]]
+binding = "SEARCH_CACHE"
+id = "bdf739dd1f6a429e8249f22e75ffe11c"
+
+# The YouTube Data API key is a secret, not configured here:
+#   npx wrangler secret put YOUTUBE_API_KEY

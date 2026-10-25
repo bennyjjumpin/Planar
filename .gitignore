@@ -1,0 +1,8 @@
+cmake-build-*/
+build/
+.idea/
+server/node_modules/
+server/.wrangler/
+*.WebView2/
+dist/
+server/youtube-key.txt
