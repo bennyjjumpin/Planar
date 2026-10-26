@@ -1,22 +1,35 @@
 #include "YouTubePlayer.h"
 
+#include <wx/ffile.h>
 #include <wx/filename.h>
 #include <wx/sizer.h>
 #include <wx/stdpaths.h>
 #include <wx/webview.h>
 
+#ifdef __WXMSW__
 // WebView2.h relies on COM declarations that WIN32_LEAN_AND_MEAN (set for
 // the whole target, to keep winsock happy) strips out of <windows.h>.
 #include <ole2.h>
 #include <WebView2.h>
+#endif
 
 namespace {
 
 // Virtual host that WebView2 maps onto <exe dir>/web. Any hostname works as
 // long as it never resolves for real: ".example" is reserved for that
 // (RFC 2606). Avoid ".local", which triggers slow mDNS lookups on Windows.
+// On macOS the page is loaded with this URL as its base instead, which gives
+// it the same origin.
+#ifdef __WXMSW__
 constexpr const wchar_t* kVirtualHost = L"planar.example";
+#endif
 constexpr const char* kPlayerUrl = "https://planar.example/player.html";
+
+#ifdef __WXMSW__
+const char* const kBackend = wxWebViewBackendEdge;
+#else
+const char* const kBackend = wxWebViewBackendDefault; // WebKit on macOS
+#endif
 
 // Name of the JS object wxWebView injects: player.html calls
 // window.wx.postMessage(...).
@@ -41,7 +54,7 @@ YouTubePlayer::YouTubePlayer(wxWindow* parent) : wxPanel(parent) {
     auto* sizer = new wxBoxSizer(wxVERTICAL);
     SetSizer(sizer);
 
-    if (!wxWebView::IsBackendAvailable(wxWebViewBackendEdge)) {
+    if (!wxWebView::IsBackendAvailable(kBackend)) {
         // Happens if the Evergreen WebView2 runtime isn't installed (it ships
         // with Windows 11, but can be missing on older Windows 10 machines).
         // Deferred so the owner has a chance to call SetEventHandler first.
@@ -54,7 +67,7 @@ YouTubePlayer::YouTubePlayer(wxWindow* parent) : wxPanel(parent) {
     // about:blank) is our signal that the native ICoreWebView2 exists and we
     // can set up the virtual host before navigating to the real page.
     m_webView = wxWebView::New(this, wxID_ANY, "about:blank", wxDefaultPosition,
-                               wxDefaultSize, wxWebViewBackendEdge);
+                               wxDefaultSize, kBackend);
     m_webView->AddScriptMessageHandler(kMessageHandler);
     m_webView->EnableContextMenu(false);
     sizer->Add(m_webView, 1, wxEXPAND);
@@ -62,8 +75,16 @@ YouTubePlayer::YouTubePlayer(wxWindow* parent) : wxPanel(parent) {
     m_webView->Bind(wxEVT_WEBVIEW_LOADED, &YouTubePlayer::OnLoaded, this);
     m_webView->Bind(wxEVT_WEBVIEW_SCRIPT_MESSAGE_RECEIVED, &YouTubePlayer::OnScriptMessage, this);
     m_webView->Bind(wxEVT_WEBVIEW_ERROR, &YouTubePlayer::OnWebViewError, this);
+
+#ifndef __WXMSW__
+    // WKWebView is created synchronously, so there's nothing to wait for (and
+    // wx doesn't report a load event for about:blank there anyway).
+    m_hostMapped = true;
+    LoadPlayerPage();
+#endif
 }
 
+#ifdef __WXMSW__
 bool YouTubePlayer::MapVirtualHost() {
     auto* core = static_cast<ICoreWebView2*>(m_webView->GetNativeBackend());
     if (!core)
@@ -80,19 +101,35 @@ bool YouTubePlayer::MapVirtualHost() {
     core3->Release();
     return SUCCEEDED(hr);
 }
+#endif
+
+void YouTubePlayer::LoadPlayerPage() {
+#ifdef __WXMSW__
+    if (!MapVirtualHost()) {
+        Emit({{"type", "error"}, {"code", "virtual-host-failed"}});
+        return;
+    }
+    m_webView->LoadURL(kPlayerUrl);
+#else
+    // WKWebView has no folder mapping, but loading the HTML with an https
+    // base URL gives the page that origin, which is all YouTube checks.
+    wxString html;
+    wxFFile file(WebDir() + wxFILE_SEP_PATH + "player.html", "rb");
+    if (!file.IsOpened() || !file.ReadAll(&html, wxConvUTF8)) {
+        Emit({{"type", "error"}, {"code", "player-page-missing"}});
+        return;
+    }
+    m_webView->SetPage(html, kPlayerUrl);
+#endif
+}
 
 void YouTubePlayer::OnLoaded(wxWebViewEvent& evt) {
     evt.Skip();
     if (m_hostMapped)
         return;
 
-    if (!MapVirtualHost()) {
-        Emit({{"type", "error"}, {"code", "virtual-host-failed"}});
-        return;
-    }
     m_hostMapped = true;
-
-    m_webView->LoadURL(kPlayerUrl);
+    LoadPlayerPage();
 }
 
 void YouTubePlayer::OnScriptMessage(wxWebViewEvent& evt) {

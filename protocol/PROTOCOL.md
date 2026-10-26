@@ -4,8 +4,10 @@ JSON text frames over one WebSocket per client, at `/session/<code>`.
 
 ## Rooms (HTTP)
 
-`POST /rooms` returns `{"code":"4821"}`: a random, unused 4-digit code
-(1000–9999), with the room already created. Only created rooms exist.
+`POST /rooms` returns `{"code":"K7M2QX"}`: a random, unused 6-character code
+from `23456789ABCDEFGHJKMNPQRSTUVWXYZ` (digits and uppercase letters without
+the lookalikes 0/O and 1/I/L), with the room already created. Codes are
+case-insensitive: the relay uppercases the code in `/session/<code>`. Only created rooms exist.
 Connecting to `/session/<code>` for an unknown code fails the WebSocket
 handshake with **HTTP 404**, and clients must not retry. A room is deleted
 after being empty for 10 minutes (including a new room nobody joined), and

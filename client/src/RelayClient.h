@@ -39,7 +39,7 @@ public:
     // search is dropped.
     void Search(const std::string& query, SearchCallback callback);
 
-    // Asks the relay for a new room with a fresh 4-digit code.
+    // Asks the relay for a new room with a fresh, random code.
     void CreateRoom(CreateRoomCallback callback);
 
     const std::string& RelayUrl() const { return m_relayUrl; }

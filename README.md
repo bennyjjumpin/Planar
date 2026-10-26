@@ -3,14 +3,14 @@
 <img src="client/assets/planar.svg" width="56" align="right" alt="Planar logo">
 
 A desktop app (C++ / wxWidgets) for listening together. Someone creates a
-room, shares its 4-digit code, everyone adds songs to a shared queue, and
+room, shares its 6-character code, everyone adds songs to a shared queue, and
 playback stays in sync on every computer.
 
 ```
 client/      C++ wxWidgets app (CMake), builds Planar.exe
   src/       app code
   web/       player.html: hosts the YouTube IFrame player
-  assets/    logo (planar.ico / planar.svg) and its generator, make_icon.py
+  assets/    logo (planar.ico / planar.icns / planar.svg) and its generator, make_icon.py
 server/      Cloudflare Worker + Durable Object relay (TypeScript, wrangler)
 protocol/    PROTOCOL.md: message and state formats
 ```
@@ -67,6 +67,7 @@ client always means `localNow + offset`.
 | file | role | status |
 |---|---|---|
 | `YouTubePlayer` | wxWebView panel hosting `web/player.html`; C++→JS via `RunScriptAsync`, JS→C++ via script message handler |
+| `YouTubeBrowser` | second wxWebView showing m.youtube.com for finding songs; an injected script turns clicks on video links into "add to queue" picks |
 | `MainFrame` | UI (join row, queue, transport, volume), sync rounds, and the reconcile loop that keeps the player matching the server |
 | `SessionState` | mirror of server state + JSON (de)serialization |
 | `SessionConnection` | IXWebSocket wrapper: intent builders, version gating, reconnect with backoff, re-join with the persistent identity, stop on "replaced" (4000), dispatch to the GUI thread |
@@ -107,11 +108,14 @@ queue on the first report and ignores duplicates. Videos nobody can play
 ### Using Planar
 
 - **Start:** enter your name, then **Create a room** (you get a random
-  4-digit code; **Copy** puts it on the clipboard), or type a friend's code
+  6-character code of letters and numbers; **Copy** puts it on the clipboard), or type a friend's code
   and **Join**. Unknown codes are refused, so a typo can't create an empty
   room by accident.
-- **Add songs:** type in the search box and press Enter, then double-click a
-  result. Pasting a YouTube link adds it directly.
+- **Add songs:** type in the search box and press Enter, or click **Browse
+  YouTube**. Either opens YouTube (the mobile site) in the side column;
+  clicking a video adds it to the queue instead of opening it, so you can
+  pick several in a row. Pasting a YouTube link adds it directly. Browsing
+  uses no API quota.
 - **Queue:** drag to reorder (host), and right-click for Move up/down and
   Remove. The Delete key removes too. You can remove songs you added; the
   host can remove any.
@@ -140,7 +144,7 @@ Command-line options, for testing only (normal use needs none):
 
 ```
 Planar --relay ws://localhost:8787 --create --name Ann --client-id ann_test_identity_01
-Planar --relay ws://localhost:8787 --room 4821 --name Bob --client-id bob_test_identity_01 --volume 0 --log bob.csv
+Planar --relay ws://localhost:8787 --room K7M2QX --name Bob --client-id bob_test_identity_01 --volume 0 --log bob.csv
 ```
 
 `--relay` points at another relay (e.g. `wrangler dev`), and `--create` /
@@ -189,6 +193,29 @@ build\client\Planar.exe
 The build copies `client/web/` next to the executable. The app serves it from
 `https://musicplayer.example/` via WebView2's virtual-host mapping.
 
+## Building the client (macOS)
+
+Requirements: Xcode Command Line Tools (`xcode-select --install`), CMake ≥
+3.24 and Ninja (both bundled with CLion), and git. On macOS the webview is
+WKWebView and TLS uses the system's Secure Transport, so mbedTLS isn't
+fetched.
+
+**CLion:** open the folder and run the `music_player` target, which builds
+`Planar.app`.
+
+**Command line:**
+
+```
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
+cmake --build build --target music_player
+open build/client/Planar.app
+```
+
+The build copies `client/web/` into `Planar.app/Contents/MacOS/web`. The
+player page is loaded with `https://planar.example/player.html` as its base
+URL, which gives it a real origin without any folder mapping. Settings are
+stored in `~/Library/Preferences/Planar Preferences` instead of the registry.
+
 ### wxWebView notes
 
 - **Origin.** YouTube embeds refuse to play from a page with no real origin
@@ -226,7 +253,9 @@ Clients connect to `ws://localhost:8787/session/<id>` locally.
 `npm run deploy`. Watch live logs with `npx wrangler tail`; the relay logs
 each connect and close.
 
-**Search setup:** create a YouTube Data API v3 key in Google Cloud
+**Search setup (no longer used by the app):** the client now finds songs
+through its in-app YouTube browser, so the relay's `/search` endpoint is
+unused. To keep it working anyway, create a YouTube Data API v3 key in Google Cloud
 (APIs & Services → enable "YouTube Data API v3" → Credentials → API key,
 restricted to that API), then store it on the relay:
 

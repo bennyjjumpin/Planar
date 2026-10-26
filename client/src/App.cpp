@@ -9,6 +9,9 @@
 #include <ixwebsocket/IXNetSystem.h>
 
 #include "MainFrame.h"
+#ifdef __WXOSX__
+#include "MacAppearance.h"
+#endif
 
 class App : public wxApp {
 public:
@@ -41,6 +44,10 @@ public:
         // IXWebSocket needs WSAStartup on Windows; it doesn't do it itself.
         ix::initNetSystem();
 
+#ifdef __WXOSX__
+        UseLightAppearance(); // before any window exists
+#endif
+
         auto* frame = new MainFrame(m_options);
         frame->Show();
         return true;
@@ -53,11 +60,11 @@ public:
 
     // Normal use needs no options. For testing, e.g.:
     //   Planar --relay ws://localhost:8787 --create --name Ann
-    //   Planar --room 4821 --name Bob --client-id bob_test_identity_01
+    //   Planar --room K7M2QX --name Bob --client-id bob_test_identity_01
     void OnInitCmdLine(wxCmdLineParser& parser) override {
         wxApp::OnInitCmdLine(parser);
         parser.AddOption("", "relay", "relay URL (default: Planar's server), e.g. ws://localhost:8787");
-        parser.AddOption("", "room", "join this 4-digit room on startup");
+        parser.AddOption("", "room", "join this room code on startup");
         parser.AddSwitch("", "create", "create a room on startup");
         parser.AddOption("", "name", "display name");
         parser.AddOption("", "volume", "local volume 0-100", wxCMD_LINE_VAL_NUMBER);

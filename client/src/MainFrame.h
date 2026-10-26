@@ -18,13 +18,13 @@
 
 class wxButton;
 class wxListBox;
-class wxListCtrl;
 class wxPanel;
 class wxSearchCtrl;
 class wxSimplebook;
 class wxSlider;
 class wxStaticText;
 class wxTextCtrl;
+class YouTubeBrowser;
 class YouTubePlayer;
 
 // Planar's relay on Cloudflare. Not shown or editable in the UI; --relay
@@ -68,8 +68,7 @@ private:
     void OnLeave();
     void OnSearchEnter();
     void ShowQueueList();
-    void ShowSearchResults();
-    void OnAddSearchResult();
+    void ShowBrowser();
     void ShowQueueMenu();
     void MoveSelected(int delta);
     void RemoveSelected();
@@ -131,10 +130,10 @@ private:
     wxSearchCtrl* m_searchCtrl = nullptr;
     wxStaticText* m_listTitle = nullptr;
     wxButton* m_backBtn = nullptr;
+    wxButton* m_browseBtn = nullptr;
     wxSimplebook* m_listBook = nullptr;
     wxListBox* m_queueList = nullptr;
-    wxListCtrl* m_searchList = nullptr;
-    std::vector<SearchResult> m_searchResults;
+    YouTubeBrowser* m_browser = nullptr;
     // Room page: seek bar and controls
     wxSlider* m_seekBar = nullptr;
     wxStaticText* m_posLabel = nullptr;
@@ -178,16 +177,22 @@ private:
     // from measurements (see LearnLatency). Commands are issued this much
     // early (or seek this much ahead) to compensate.
     enum CommandKind { kStart, kResume, kSeek, kNone };
-    // Defaults are typical values measured on a Windows 11 / WebView2 machine;
-    // learned values are saved in the settings, since they are properties of
-    // the machine and its connection.
+    // Defaults are typical values measured on a Windows 11 / WebView2 machine
+    // (and on a MacBook / WKWebView, where cold starts and seeks are much
+    // slower); learned values are saved in the settings, since they are
+    // properties of the machine and its connection.
+#ifdef __WXOSX__
+    double m_latencyMs[3] = {850, 150, 450};
+#else
     double m_latencyMs[3] = {220, 150, 130};
+#endif
     CommandKind m_pendingKind = kNone;
     // The session timeline (index, startedAt, paused) when the pending
     // command was issued. If the server changes it before we measure (a seek,
     // a skip, a pause), the measurement says nothing about our latency.
     std::string m_pendingTimeline;
     double m_lastStatusAtMs = -1; // local ms of the last player status
+    bool m_lastStatusPlaying = false; // whether the player was moving at that status
 
     std::string m_endedSentFor;      // "index@startedAt" we already reported ended
     std::string m_unplayableSentFor; // likewise for unplayable

@@ -1,8 +1,14 @@
-"""Generates Planar's logo as planar.ico (16-256 px) and planar.svg.
+"""Generates Planar's logo as planar.ico (16-256 px), planar.icns (macOS,
+16-1024 px) and planar.svg.
 
 The logo is two flat isometric planes, one stacked above the other. It's
 pure geometry, so this rasterizes it directly (4x4 supersampling) and writes
-PNG-compressed ICO entries with only the standard library. No Pillow needed.
+PNG-compressed ICO and ICNS entries with only the standard library. No
+Pillow needed.
+
+The macOS icon puts the logo on a white rounded square, the shape macOS
+expects (it frames anything else in a grey plate), with Apple's margins:
+an 824 px body on a 1024 px canvas.
 
 The same shapes are drawn by client/src/Logo.cpp and client/web/player.html;
 keep them in sync if you change the design.
@@ -20,6 +26,16 @@ BACK_RGB = (0xC7, 0xD2, 0xFE)   # indigo-200
 FRONT_RGB = (0x4F, 0x46, 0xE5)  # indigo-600
 SIZES = [16, 20, 24, 32, 40, 48, 64, 128, 256]
 SS = 4  # supersamples per axis
+
+# macOS icon, on the same 64-unit grid: body inset by 100/1024 of the canvas,
+# corner radius about 22% of the body, logo scaled into the middle.
+MAC_INSET = 64 * 100 / 1024
+MAC_RADIUS = (64 - 2 * MAC_INSET) * 0.2237
+MAC_LOGO_SCALE = 0.62
+MAC_BG_RGB = (0xFF, 0xFF, 0xFF)
+# (ICNS type, pixel size) for every slot macOS looks up, 1x and 2x.
+ICNS_TYPES = [(b"icp4", 16), (b"ic11", 32), (b"icp5", 32), (b"ic12", 64), (b"ic07", 128),
+              (b"ic13", 256), (b"ic08", 256), (b"ic14", 512), (b"ic09", 512), (b"ic10", 1024)]
 
 
 def inside(poly, x, y):
@@ -63,6 +79,51 @@ def render(size):
     return rows
 
 
+def in_rounded_square(x, y):
+    lo, hi, r = MAC_INSET, 64 - MAC_INSET, MAC_RADIUS
+    if not (lo <= x <= hi and lo <= y <= hi):
+        return False
+    cx = min(max(x, lo + r), hi - r)
+    cy = min(max(y, lo + r), hi - r)
+    return (x - cx) ** 2 + (y - cy) ** 2 <= r * r
+
+
+def render_mac(size):
+    k = MAC_LOGO_SCALE
+    front = [(32 + (x - 32) * k, 32 + (y - 32) * k) for x, y in FRONT]
+    back = [(32 + (x - 32) * k, 32 + (y - 32) * k) for x, y in BACK]
+    ss = SS if size <= 256 else 2  # plenty at that resolution, and much faster
+    scale = 64 / size
+    rows = []
+    for py in range(size):
+        row = bytearray()
+        for px in range(size):
+            acc = [0, 0, 0]
+            covered = 0
+            for sy in range(ss):
+                for sx in range(ss):
+                    x = (px + (sx + 0.5) / ss) * scale
+                    y = (py + (sy + 0.5) / ss) * scale
+                    if not in_rounded_square(x, y):
+                        continue
+                    covered += 1
+                    rgb = FRONT_RGB if inside(front, x, y) else BACK_RGB if inside(back, x, y) else MAC_BG_RGB
+                    for i in range(3):
+                        acc[i] += rgb[i]
+            if covered == 0:
+                row += b"\0\0\0\0"
+                continue
+            row += bytes([round(c / covered) for c in acc] + [round(covered / (ss * ss) * 255)])
+        rows.append(bytes(row))
+    return rows
+
+
+def icns(pngs):
+    # Each entry: 4-byte type, 4-byte length (header included), PNG data.
+    body = b"".join(t + struct.pack(">I", 8 + len(data)) + data for t, data in pngs)
+    return b"icns" + struct.pack(">I", 8 + len(body)) + body
+
+
 def png(size, rows):
     raw = b"".join(b"\0" + r for r in rows)  # filter type 0 per scanline
 
@@ -104,4 +165,7 @@ if __name__ == "__main__":
         f.write(svg())
     with open(os.path.join(here, "planar-256.png"), "wb") as f:
         f.write(dict(images)[256])
-    print("wrote planar.ico, planar.svg, planar-256.png")
+    mac = {s: png(s, render_mac(s)) for s in sorted({s for _, s in ICNS_TYPES})}
+    with open(os.path.join(here, "planar.icns"), "wb") as f:
+        f.write(icns([(t, mac[s]) for t, s in ICNS_TYPES]))
+    print("wrote planar.ico, planar.icns, planar.svg, planar-256.png")

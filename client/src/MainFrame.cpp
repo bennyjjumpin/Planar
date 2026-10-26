@@ -11,7 +11,6 @@
 #include <wx/config.h>
 #include <wx/iconbndl.h>
 #include <wx/listbox.h>
-#include <wx/listctrl.h>
 #include <wx/menu.h>
 #include <wx/msgdlg.h>
 #include <wx/panel.h>
@@ -23,12 +22,15 @@
 #include <wx/textctrl.h>
 #include <wx/valtext.h>
 
+#ifdef __WXMSW__
 #include <wx/msw/wrapwin.h>
 #include <commctrl.h>
+#endif
 
 #include "Logo.h"
 #include "Theme.h"
 #include "VideoId.h"
+#include "YouTubeBrowser.h"
 #include "YouTubePlayer.h"
 
 namespace {
@@ -64,6 +66,17 @@ constexpr double kMaxLatencyMs = 1000;
 // A measured error bigger than this isn't latency (it's a server-side jump
 // or a stall) and must not be learned from.
 constexpr double kMaxLearnErrorMs = 1000;
+// Whether a small offset that persists (see PlaybackController::
+// kSteadySamples) gets one corrective seek. WebView2 seeks within the buffer
+// seamlessly, so on Windows that's free. WebKit's player rebuffers on every
+// seek (and on rate changes), an audible stall of 100-300 ms that also
+// leaves it off again, so on macOS an offset under kDriftToleranceSec is
+// better left alone.
+#ifdef __WXOSX__
+constexpr bool kSteadyCorrections = false;
+#else
+constexpr bool kSteadyCorrections = true;
+#endif
 // How long a FlashFooter() message stays up.
 constexpr double kFooterFlashMs = 4000;
 
@@ -81,8 +94,13 @@ std::string FormatTime(double sec) {
     return wxString::Format("%d:%02d", s / 60, s % 60).ToStdString();
 }
 
+// Room codes: digits and uppercase letters without the lookalikes 0/O and
+// 1/I/L. Mirrors ROOM_CODE_ALPHABET / ROOM_CODE_LENGTH in server/src/index.ts.
+const char* const kRoomCodeAlphabet = "23456789ABCDEFGHJKMNPQRSTUVWXYZ";
+constexpr size_t kRoomCodeLength = 6;
+
 bool IsRoomCode(const wxString& s) {
-    return s.length() == 4 && s.find_first_not_of("0123456789") == wxString::npos;
+    return s.length() == kRoomCodeLength && s.find_first_not_of(kRoomCodeAlphabet) == wxString::npos;
 }
 
 wxStaticText* Label(wxWindow* parent, const wxString& text, const wxColour& colour = theme::kText) {
@@ -119,8 +137,11 @@ MainFrame::MainFrame(const LaunchOptions& options)
         m_log.open(options.logPath, std::ios::out | std::ios::trunc);
     Log("localMs,serverMs,event,state,desiredSec,reportedSec,driftMs,rttMs,version,videoId");
 
-    // "appicon" is the icon resource in app.rc.
+#ifdef __WXMSW__
+    // "appicon" is the icon resource in app.rc. (On macOS the Dock icon comes
+    // from the app bundle instead.)
     SetIcons(wxIconBundle("appicon", ::GetModuleHandle(nullptr)));
+#endif
     SetBackgroundColour(theme::kBackground);
     SetClientSize(FromDIP(wxSize(1180, 700)));
     SetMinClientSize(FromDIP(wxSize(900, 560)));
@@ -197,10 +218,14 @@ wxPanel* MainFrame::BuildStartPage(wxWindow* parent) {
     col->Add(orRow, 0, wxEXPAND | wxTOP | wxBOTTOM, gap * 2);
 
     auto* joinRow = new wxBoxSizer(wxHORIZONTAL);
+    // Only characters that can appear in a code, in either case; they are
+    // shown uppercase as they're typed (see the wxEVT_TEXT handler).
+    wxTextValidator codeValidator(wxFILTER_INCLUDE_CHAR_LIST);
+    codeValidator.SetCharIncludes(wxString(kRoomCodeAlphabet) + wxString(kRoomCodeAlphabet).Lower());
     m_codeText = new wxTextCtrl(page, wxID_ANY, "", wxDefaultPosition, wxDefaultSize,
-                                wxTE_CENTRE | wxTE_PROCESS_ENTER, wxTextValidator(wxFILTER_DIGITS));
-    m_codeText->SetHint("0000");
-    m_codeText->SetMaxLength(4);
+                                wxTE_CENTRE | wxTE_PROCESS_ENTER, codeValidator);
+    m_codeText->SetHint("ABC234");
+    m_codeText->SetMaxLength(kRoomCodeLength);
     m_codeText->SetFont(m_codeText->GetFont().Scaled(1.4f));
     m_joinBtn = new wxButton(page, wxID_ANY, "Join");
     joinRow->Add(m_codeText, 1, wxEXPAND | wxRIGHT, gap);
@@ -221,7 +246,21 @@ wxPanel* MainFrame::BuildStartPage(wxWindow* parent) {
     m_createBtn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { OnCreateRoom(); });
     m_joinBtn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { OnJoinRoom(); });
     m_codeText->Bind(wxEVT_TEXT_ENTER, [this](wxCommandEvent&) { OnJoinRoom(); });
-    m_codeText->Bind(wxEVT_TEXT, [this](wxCommandEvent&) { UpdateControls(); });
+    m_codeText->Bind(wxEVT_TEXT, [this](wxCommandEvent&) {
+        // Uppercase as typed, and drop anything that can't be in a code (the
+        // validator only filters keystrokes, not pasted text).
+        const wxString typed = m_codeText->GetValue();
+        wxString code;
+        for (const wxUniChar c : typed.Upper())
+            if (wxString(kRoomCodeAlphabet).Find(c) != wxNOT_FOUND)
+                code += c;
+        if (code != typed) {
+            const long caret = m_codeText->GetInsertionPoint();
+            m_codeText->ChangeValue(code.Left(kRoomCodeLength));
+            m_codeText->SetInsertionPoint(std::min<long>(caret, m_codeText->GetLastPosition()));
+        }
+        UpdateControls();
+    });
     return page;
 }
 
@@ -278,6 +317,8 @@ wxPanel* MainFrame::BuildRoomPage(wxWindow* parent) {
     m_listTitle = Label(sidePanel, "Up next");
     m_listTitle->SetFont(m_listTitle->GetFont().Bold());
     listHeader->Add(m_listTitle, 1, wxALIGN_CENTER_VERTICAL);
+    m_browseBtn = new wxButton(sidePanel, wxID_ANY, "Browse YouTube", wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT);
+    listHeader->Add(m_browseBtn, 0, wxALIGN_CENTER_VERTICAL);
     m_backBtn = new wxButton(sidePanel, wxID_ANY, "Back to queue", wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT);
     listHeader->Add(m_backBtn, 0, wxALIGN_CENTER_VERTICAL);
     side->Add(listHeader, 0, wxEXPAND | wxTOP | wxBOTTOM, gap * 1.5);
@@ -285,12 +326,9 @@ wxPanel* MainFrame::BuildRoomPage(wxWindow* parent) {
     m_listBook = new wxSimplebook(sidePanel);
     m_queueList = new wxListBox(m_listBook, wxID_ANY, wxDefaultPosition, wxDefaultSize, 0, nullptr, wxBORDER_NONE);
     m_queueList->SetToolTip("Drag to reorder, right-click for more (host)");
-    m_searchList = new wxListCtrl(m_listBook, wxID_ANY, wxDefaultPosition, wxDefaultSize,
-                                  wxLC_REPORT | wxLC_SINGLE_SEL | wxLC_NO_HEADER | wxBORDER_NONE);
-    m_searchList->AppendColumn("Song");
-    m_searchList->AppendColumn("Length", wxLIST_FORMAT_RIGHT);
+    m_browser = new YouTubeBrowser(m_listBook);
     m_listBook->AddPage(m_queueList, "queue");
-    m_listBook->AddPage(m_searchList, "results");
+    m_listBook->AddPage(m_browser, "browse");
     side->Add(m_listBook, 1, wxEXPAND);
     sidePanel->SetSizer(side);
     body->Add(sidePanel, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, gap * 1.5);
@@ -354,12 +392,15 @@ void MainFrame::BindRoomControls() {
         ShowQueueList();
     });
     m_backBtn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { ShowQueueList(); });
-    m_searchList->Bind(wxEVT_LIST_ITEM_ACTIVATED, [this](wxListEvent&) { OnAddSearchResult(); });
-    m_searchList->Bind(wxEVT_SIZE, [this](wxSizeEvent& e) {
-        e.Skip();
-        const int lengthCol = FromDIP(52);
-        m_searchList->SetColumnWidth(1, lengthCol);
-        m_searchList->SetColumnWidth(0, std::max(FromDIP(80), m_searchList->GetClientSize().x - lengthCol - 1));
+    m_browseBtn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
+        ShowBrowser();
+        m_browser->Home();
+    });
+    // Clicking a video in the browser queues it; the browser stays open so
+    // several songs can be picked in a row.
+    m_browser->SetPickHandler([this](const YouTubeBrowser::Pick& pick) {
+        if (Send(intent::Add(pick.videoId, pick.title, pick.durationSec)))
+            FlashFooter(pick.title.empty() ? wxString("Added to the queue") : U8("Added: " + pick.title));
     });
 
     // Queue: drag to reorder, right-click menu, Delete key.
@@ -387,6 +428,7 @@ void MainFrame::BindRoomControls() {
         m_posLabel->SetLabel(FormatTime(m_seekBar->GetValue() / 10.0));
     });
     m_seekBar->Bind(wxEVT_SCROLL_CHANGED, [this](wxScrollEvent&) { OnSeekBarChanged(); });
+#ifdef __WXMSW__
     // A click on the track jumps there. (Windows' trackbar would only move one
     // page towards the click, which nobody expects from a seek bar.) Clicks on
     // the thumb fall through to the normal drag.
@@ -408,6 +450,7 @@ void MainFrame::BindRoomControls() {
         OnSeekBarChanged();
         // Not skipped: the native control must not also do its page step.
     });
+#endif // macOS sliders already jump to the click
 }
 
 // Drag-to-reorder: press on an item, release on another. wxListBox has no
@@ -481,7 +524,7 @@ void MainFrame::OnCreateRoom() {
 void MainFrame::OnJoinRoom() {
     const wxString code = m_codeText->GetValue().Trim().Trim(false);
     if (!IsRoomCode(code)) {
-        ShowStartPage("Room codes are 4 digits.", true);
+        ShowStartPage(wxString::Format("Room codes are %d letters and numbers.", static_cast<int>(kRoomCodeLength)), true);
         return;
     }
     EnterRoom(code.utf8_string());
@@ -550,50 +593,25 @@ void MainFrame::OnSearchEnter() {
         }
     }
 
-    m_listTitle->SetLabel(U8(std::string("Searching") + kGlyphEllipsis));
-    ShowSearchResults();
-    m_searchList->DeleteAllItems();
-    m_relay->Search(text, [this, text](const std::vector<SearchResult>& results, const std::string& error) {
-        m_searchResults = results;
-        m_searchList->DeleteAllItems();
-        for (size_t i = 0; i < results.size(); ++i) {
-            const auto& r = results[i];
-            const long row = m_searchList->InsertItem(static_cast<long>(i),
-                                                      U8(r.title + "  " + kGlyphDot + "  " + r.channel));
-            m_searchList->SetItem(row, 1, r.durationSec ? U8(FormatTime(*r.durationSec)) : wxString());
-        }
-        if (!error.empty()) {
-            m_listTitle->SetLabel("Search failed");
-            FlashFooter(U8(error), true);
-        } else if (results.empty()) {
-            m_listTitle->SetLabel("No results");
-        } else {
-            m_listTitle->SetLabel("Double-click to add");
-        }
-        m_listTitle->GetParent()->Layout();
-    });
+    // Anything else is a search, in the in-app YouTube browser (no API quota).
+    ShowBrowser();
+    m_browser->Search(text);
 }
 
 void MainFrame::ShowQueueList() {
     m_listBook->SetSelection(0);
     m_listTitle->SetLabel("Up next");
     m_backBtn->Hide();
+    m_browseBtn->Show();
     m_listTitle->GetParent()->Layout();
 }
 
-void MainFrame::ShowSearchResults() {
+void MainFrame::ShowBrowser() {
     m_listBook->SetSelection(1);
+    m_listTitle->SetLabel("Click a video to add it");
+    m_browseBtn->Hide();
     m_backBtn->Show();
     m_listTitle->GetParent()->Layout();
-}
-
-void MainFrame::OnAddSearchResult() {
-    const long row = m_searchList->GetNextItem(-1, wxLIST_NEXT_ALL, wxLIST_STATE_SELECTED);
-    if (row < 0 || row >= static_cast<long>(m_searchResults.size()))
-        return;
-    const auto& r = m_searchResults[row];
-    if (Send(intent::Add(r.videoId, r.title, r.durationSec.value_or(0))))
-        FlashFooter(U8("Added: " + r.title));
 }
 
 bool MainFrame::CanRemove(int index) const {
@@ -923,6 +941,7 @@ void MainFrame::Reconcile(const nlohmann::json* status, bool force) {
     if (status) {
         m_lastStatusPos = status->value("currentTime", 0.0);
         m_lastStatusAtMs = now;
+        m_lastStatusPlaying = playerState == "playing";
         Log(wxString::Format("%.0f,%.0f,status,%s,%.3f,%.3f,%.1f,%.1f,%lld,%s", now, m_clock.ServerNowMs(),
                              playerState, d.positionSec, m_lastStatusPos, (m_lastStatusPos - d.positionSec) * 1000.0,
                              m_clock.BestRttMs(), static_cast<long long>(m_state.version), d.videoId)
@@ -994,6 +1013,13 @@ void MainFrame::Reconcile(const nlohmann::json* status, bool force) {
     const double toleranceMs = PlaybackController::kDriftToleranceSec * 1000.0;
 
     if (!d.playing) {
+        if (IsRunning(playerState) && d.startsInMs > 0 && m_pendingKind == kStart &&
+            m_pendingTimeline == TimelineKey(m_state)) {
+            // We pressed play early, by the start latency, for this very
+            // scheduled start. A state that arrives in between (often just
+            // the server filling in the title) must not pause it again.
+            return;
+        }
         if (IsRunning(playerState)) {
             // Pause, then park exactly where the server says we paused, so
             // every client stops at the same spot even though the message
@@ -1044,8 +1070,11 @@ void MainFrame::Reconcile(const nlohmann::json* status, bool force) {
 
     // New server state while playing (e.g. the host seeked): act now rather
     // than waiting up to a poll interval for the next status. Where the
-    // player is now is predictable from the last report.
-    if (!status && force && playerState == "playing" && m_lastStatusAtMs >= 0 && now - m_lastStatusAtMs < 2000) {
+    // player is now is predictable from the last report, if it was moving
+    // then (a report from while it was still buffering would make a freshly
+    // started track look far behind).
+    if (!status && force && playerState == "playing" && m_lastStatusPlaying && m_lastStatusAtMs >= 0 &&
+        now - m_lastStatusAtMs < 2000) {
         const double predicted = m_lastStatusPos + (now - m_lastStatusAtMs) / 1000.0;
         if (std::abs(predicted - d.positionSec) * 1000.0 > toleranceMs) {
             m_player->SeekTo(d.positionSec + m_latencyMs[kSeek] / 1000.0);
@@ -1071,7 +1100,7 @@ void MainFrame::Reconcile(const nlohmann::json* status, bool force) {
 
         auto target = m_playback.CorrectionFor(d, m_lastStatusPos);
         const char* why = "correct";
-        if (!target && m_steadyCount >= PlaybackController::kSteadySamples && !d.finished) {
+        if (!target && kSteadyCorrections && m_steadyCount >= PlaybackController::kSteadySamples && !d.finished) {
             target = d.positionSec;
             why = "correctSteady";
         }

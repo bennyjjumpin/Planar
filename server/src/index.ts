@@ -9,18 +9,30 @@ export interface Env extends SearchEnv {
 
 const SESSION_PATH = /^\/session\/([A-Za-z0-9_-]{1,64})$/;
 
-// Room codes: 4 digits, 1000-9999 (no leading zero to trip over).
-const ROOM_CODE_MIN = 1000;
-const ROOM_CODE_SPAN = 9000;
+// Room codes: 6 characters from digits and uppercase letters, leaving out
+// the lookalikes 0/O and 1/I/L so codes read aloud and type cleanly.
+// 31^6 is about 887 million codes, so guessing a live room is impractical.
+// Mirrored in client/src/MainFrame.cpp (kRoomCodeAlphabet, kRoomCodeLength).
+const ROOM_CODE_ALPHABET = "23456789ABCDEFGHJKMNPQRSTUVWXYZ";
+const ROOM_CODE_LENGTH = 6;
 const ROOM_CODE_TRIES = 25;
 
 function randomRoomCode(): string {
-  const n = new Uint32Array(1);
-  crypto.getRandomValues(n);
-  return String(ROOM_CODE_MIN + (n[0] % ROOM_CODE_SPAN));
+  // Rejection sampling: bytes past the largest multiple of the alphabet size
+  // would make the first letters more likely than the rest.
+  const limit = 256 - (256 % ROOM_CODE_ALPHABET.length);
+  let code = "";
+  while (code.length < ROOM_CODE_LENGTH) {
+    const bytes = new Uint8Array(16);
+    crypto.getRandomValues(bytes);
+    for (const b of bytes) {
+      if (b < limit && code.length < ROOM_CODE_LENGTH) code += ROOM_CODE_ALPHABET[b % ROOM_CODE_ALPHABET.length];
+    }
+  }
+  return code;
 }
 
-// POST /rooms -> {"code":"4821"}: picks a random code that isn't in use and
+// POST /rooms -> {"code":"K7M2QX"}: picks a random code that isn't in use and
 // creates the room. Each try asks that code's Durable Object to claim it, so
 // two people creating rooms at once can never get the same code.
 async function createRoom(env: Env): Promise<Response> {
@@ -71,7 +83,8 @@ export default {
     }
     // idFromName is deterministic: everyone using the same join code reaches
     // the same Durable Object instance, wherever they are in the world.
-    const stub = env.SESSIONS.get(env.SESSIONS.idFromName(match[1]));
+    // Codes are uppercase; a code typed in lowercase still finds its room.
+    const stub = env.SESSIONS.get(env.SESSIONS.idFromName(match[1].toUpperCase()));
     return stub.fetch(request);
   },
 } satisfies ExportedHandler<Env>;
@@ -114,7 +127,7 @@ export class SessionRelay extends DurableObject<Env> {
   }
 
   async fetch(request: Request): Promise<Response> {
-    const sessionId = new URL(request.url).pathname.match(SESSION_PATH)![1];
+    const sessionId = new URL(request.url).pathname.match(SESSION_PATH)![1].toUpperCase();
     // Only rooms created through POST /rooms exist; a mistyped code must
     // not silently create a new, empty room.
     if (!(await this.ctx.storage.get<SessionState>("state"))) {

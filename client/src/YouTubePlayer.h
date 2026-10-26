@@ -10,7 +10,7 @@ class wxWebView;
 class wxWebViewEvent;
 
 // A visible panel hosting the YouTube IFrame player (web/player.html) inside
-// a WebView2-backed wxWebView.
+// a wxWebView (WebView2 on Windows, WKWebView on macOS).
 //
 // This class is purely a transport: it forwards commands to the JS player and
 // reports player events back. It never decides what should be playing; that's
@@ -52,7 +52,11 @@ private:
     void OnScriptMessage(wxWebViewEvent& evt);
     void OnWebViewError(wxWebViewEvent& evt);
 
+#ifdef __WXMSW__
     bool MapVirtualHost();
+#endif
+    // Loads web/player.html with a real https origin.
+    void LoadPlayerPage();
     void Call(const std::string& js);
     void Emit(const nlohmann::json& event);
 
