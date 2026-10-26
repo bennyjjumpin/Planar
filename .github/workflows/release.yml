@@ -1,0 +1,126 @@
+# Builds Planar for macOS and Windows and publishes both as a GitHub release.
+#
+#   git tag v1.2.0 && git push origin v1.2.0
+#
+# builds both apps with version 1.2.0 and attaches Planar-mac.zip and
+# Planar-windows.zip to the "v1.2.0" release. The website's download buttons
+# point at releases/latest/download/<those names>, so they serve the new
+# build as soon as the release is published.
+#
+# "Run workflow" on the Actions tab builds both without releasing, to check
+# that everything still compiles; the zips are kept as run artifacts.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write # creating the release
+
+jobs:
+  mac:
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Version
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then v="${GITHUB_REF_NAME#v}"; else v="0.0.0-dev"; fi
+          echo "PLANAR_VERSION=$v" >> "$GITHUB_ENV"
+
+      - name: Install Ninja
+        run: brew install ninja
+
+      # Universal (Apple Silicon + Intel), runs on macOS 13 and newer.
+      - name: Configure
+        run: >
+          cmake -S . -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0
+          "-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64"
+          -DPLANAR_VERSION="$PLANAR_VERSION"
+
+      - name: Build
+        run: cmake --build build --target music_player
+
+      # Not a Developer ID signature (that needs a paid Apple account), but an
+      # ad-hoc one that covers the whole bundle. Without it, a downloaded copy
+      # is reported as "damaged" instead of offering Open Anyway.
+      - name: Sign (ad hoc)
+        run: |
+          codesign --force --deep --sign - build/client/Planar.app
+          codesign --verify --deep --strict build/client/Planar.app
+
+      - name: Package
+        run: ditto -c -k --keepParent build/client/Planar.app Planar-mac.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Planar-mac
+          path: Planar-mac.zip
+          if-no-files-found: error
+
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Version
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then v="${GITHUB_REF_NAME#v}"; else v="0.0.0-dev"; fi
+          echo "PLANAR_VERSION=$v" >> "$GITHUB_ENV"
+
+      # The Visual Studio generator finds MSVC by itself, no developer prompt
+      # needed (the README's Ninja route needs one).
+      - name: Configure
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DPLANAR_VERSION="$env:PLANAR_VERSION"
+
+      - name: Build
+        run: cmake --build build --config Release --target music_player
+
+      # Planar.exe, its web/ folder and the three VC++ runtime DLLs, as in the
+      # README's "Distributing a test build".
+      - name: Package
+        run: |
+          $out = "dist\Planar"
+          New-Item -ItemType Directory -Force $out | Out-Null
+          Copy-Item build\client\Release\Planar.exe $out
+          Copy-Item -Recurse build\client\Release\web $out
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+          $crt = Get-ChildItem "$vs\VC\Redist\MSVC\*\x64\Microsoft.VC143.CRT" -Directory |
+                 Sort-Object FullName | Select-Object -Last 1
+          if (-not $crt) { throw "VC++ runtime redistributables not found" }
+          foreach ($dll in "msvcp140.dll", "vcruntime140.dll", "vcruntime140_1.dll") {
+            Copy-Item (Join-Path $crt.FullName $dll) $out
+          }
+          Compress-Archive -Path $out -DestinationPath Planar-windows.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Planar-windows
+          path: Planar-windows.zip
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [mac, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+
+      # Re-running the workflow for the same tag replaces the files.
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 ||
+            gh release create "$GITHUB_REF_NAME" --title "Planar ${GITHUB_REF_NAME#v}" --generate-notes
+          gh release upload "$GITHUB_REF_NAME" Planar-mac.zip Planar-windows.zip --clobber

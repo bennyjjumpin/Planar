@@ -274,7 +274,31 @@ Deploys don't drop connected clients: Cloudflare keeps hibernated
 WebSockets open across code updates, so sessions keep playing through a
 redeploy.
 
-## Distributing a test build
+## Releases
+
+Pushing a version tag builds both apps on GitHub Actions
+(`.github/workflows/release.yml`) and publishes them as a GitHub release:
+
+```
+git tag v1.2.0
+git push origin v1.2.0
+```
+
+The release gets `Planar-mac.zip` (universal, macOS 13+, ad-hoc signed) and
+`Planar-windows.zip` (x64, with the VC++ runtime DLLs). These always point at
+the newest release, which is what the website's download buttons use:
+
+```
+https://github.com/bennyjjumpin/Planar/releases/latest/download/Planar-mac.zip
+https://github.com/bennyjjumpin/Planar/releases/latest/download/Planar-windows.zip
+```
+
+"Run workflow" on the Actions tab builds both without releasing, as a
+compile check. Neither app is code-signed by a paid certificate yet, so on
+first launch macOS needs System Settings → Privacy & Security → Open Anyway,
+and Windows SmartScreen needs More info → Run anyway.
+
+### By hand (Windows)
 
 Build the `Release` configuration (for example into
 `cmake-build-release-visual-studio`), then ship `Planar.exe`, the

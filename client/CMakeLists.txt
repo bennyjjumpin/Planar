@@ -4,6 +4,10 @@ project(music_player_client LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# The app's version. Release builds get it from the git tag (see
+# .github/workflows/release.yml); local builds are "0.0.0-dev".
+set(PLANAR_VERSION "0.0.0-dev" CACHE STRING "Planar version, e.g. 1.2.0")
+
 if(WIN32 AND NOT MSVC)
     # wxWebView's Edge (WebView2) backend is only reliable with MSVC. MinGW
     # builds silently fall back to the IE backend, which YouTube doesn't support.
@@ -108,6 +112,7 @@ add_executable(music_player WIN32 MACOSX_BUNDLE
     src/Logo.cpp
 )
 target_include_directories(music_player PRIVATE src)
+target_compile_definitions(music_player PRIVATE PLANAR_VERSION="${PLANAR_VERSION}")
 if(APPLE)
     enable_language(OBJCXX)
     target_sources(music_player PRIVATE src/MacAppearance.mm)
@@ -138,6 +143,8 @@ if(APPLE)
         MACOSX_BUNDLE_BUNDLE_NAME "Planar"
         MACOSX_BUNDLE_GUI_IDENTIFIER "dev.planar.client"
         MACOSX_BUNDLE_ICON_FILE "planar.icns"
+        MACOSX_BUNDLE_SHORT_VERSION_STRING "${PLANAR_VERSION}"
+        MACOSX_BUNDLE_BUNDLE_VERSION "${PLANAR_VERSION}"
     )
 endif()
 
